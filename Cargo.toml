@@ -1,0 +1,19 @@
+# SPDX-FileCopyrightText: © 2023 Matthew Rothlisberger
+# SPDX-License-Identifier: GPL-3.0-only
+
+# Find full copyright information in the COPYRIGHT file.
+
+[package]
+name = "impack"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+image = "0.24"
+winit = "0.29"
+softbuffer = "0.4"
+zip = "0.6"
+rfd = "0.12"
+
+[build-dependencies]
+image = "0.24"
