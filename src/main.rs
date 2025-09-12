@@ -34,8 +34,10 @@ use std::{
     rc::Rc,
 };
 
+use ab_glyph::FontRef;
 use rfd::FileDialog;
 use winit::{
+    dpi::PhysicalPosition,
     event::{ElementState, Event, KeyEvent, WindowEvent},
     event_loop::{ControlFlow, EventLoop},
     keyboard::{Key, NamedKey},
@@ -58,6 +60,13 @@ enum Dspn {
     Zip,
 }
 
+enum Rot {
+    R0,
+    R90,
+    R180,
+    R270,
+}
+
 /// Mosaic maximum edge length
 const MSC_MX_E: u32 = 200;
 
@@ -78,6 +87,13 @@ fn main() {
     let mut inp_path = env::args().nth(1).map(|s| PathBuf::from(s));
     let mut out_path = env::args().nth(2).map(|s| PathBuf::from(s));
 
+    let trail_path = PathBuf::from(".impack-trail");
+    let mut trail_out = File::options()
+        .write(true)
+        .create(true)
+        .open(trail_path)
+        .unwrap();
+
     let mut file_paths: Vec<PathBuf> = vec![];
     let mut cats_assigned: Vec<Option<u8>> = vec![];
     let mut useful_minis: Vec<Option<image::DynamicImage>> = vec![];
@@ -88,8 +104,12 @@ fn main() {
 
     let mut dspns: Vec<(u8, Dspn)> = vec![];
 
+    let mut spos = 0;
+
     let mut cur_fp = 0;
     let mut cur_cat = 0;
+
+    let mut cur_rot = Rot::R0;
 
     let mut loaded_image: Option<(usize, image::DynamicImage)> = None;
 
@@ -100,8 +120,11 @@ fn main() {
 
     let context = softbuffer::Context::new(frame.clone()).unwrap();
     let mut surface = softbuffer::Surface::new(&context, frame.clone()).unwrap();
+    let mut full_buffer = vec![0u32; 0];
 
     let mut no_mods = true;
+
+    let font = FontRef::try_from_slice(include_bytes!("../FreeMono.otf")).unwrap();
 
     event_loop.run(move |event, elwt| match event {
         Event::WindowEvent {
@@ -113,12 +136,17 @@ fn main() {
                 (size.width, size.height)
             };
 
+            let mut fullheight = height;
+
             surface.resize(
                 NonZeroU32::new(width).unwrap(),
                 NonZeroU32::new(height).unwrap(),
             ).unwrap();
 
             let mut draw_buffer = surface.buffer_mut().unwrap();
+
+            full_buffer.clear();
+            full_buffer.extend_from_slice(&vec![0xFFFFFF; (width * height) as usize]);
 
             // println!("State: {:?}", state);
 
@@ -128,7 +156,8 @@ fn main() {
                 State::Init => {
                     while inp_path.is_none() {
                         draw::ins_text(
-                            &mut draw_buffer,
+                            &font,
+                            &mut full_buffer,
                             (width, height),
                             (0, 0),
                             80,
@@ -152,6 +181,8 @@ fn main() {
                         cats_assigned.push(None);
                         useful_minis.push(None);
                     });
+
+                    file_paths.sort();
 
                     state = State::Elect;
                     frame.request_redraw();
@@ -180,7 +211,7 @@ fn main() {
 
                         let orig_image = match loaded_image {
                             Some((f, ref img)) if f == cur_fp => img,
-                            _ => match image::io::Reader::open(&file_paths[cur_fp])
+                            _ => match image::ImageReader::open(&file_paths[cur_fp])
                                 .unwrap()
                                 .with_guessed_format()
                                 .unwrap()
@@ -207,12 +238,19 @@ fn main() {
                             }
                         };
 
-                        let (oiw, oih) = (orig_image.width(), orig_image.height());
+                        let rot_image = match cur_rot {
+                            Rot::R0 => orig_image,
+                            Rot::R90 => &orig_image.rotate90(),
+                            Rot::R180 => &orig_image.rotate180(),
+                            Rot::R270 => &orig_image.rotate270(),
+                        };
 
-                        if oiw > width || oih > height {
-                            orig_image.resize(width, height, image::imageops::Triangle)
+                        let (iw, ih) = (rot_image.width(), rot_image.height());
+
+                        if iw > width || ih > height {
+                            rot_image.resize(width, height, image::imageops::Triangle)
                         } else {
-                            orig_image.clone()
+                            rot_image.clone()
                         }
                     };
 
@@ -224,10 +262,11 @@ fn main() {
                     draw::ins_image(&mut draw_buffer, (width, height), (xofs, yofs), (siw, sih), &img_pix_buf);
 
                     draw::ins_text(
+                        &font,
                         &mut draw_buffer,
                         (width, height),
-                        (0, (height - height / 40)),
-                        (height / 40) as u8,
+                        (0, (height - height / 20)),
+                        (height / 20) as u8,
                         format!("{cur_fp}").as_bytes(),
                     );
                 }
@@ -251,15 +290,21 @@ fn main() {
                         }
                     }
 
-                    let mut topline = 0;
+                    let mut topline: u32 = 0;
                     topline += 40 * draw::flow_text(
-                        &mut draw_buffer,
+                        &font,
+                        &mut full_buffer,
                         (width, height),
                         (0, topline),
                         None,
                         40,
                         format!("Dispose Category {}", (cur_cat as u8 + 0x41) as char).as_bytes(),
                     );
+
+                    if topline >= fullheight - 100 {
+                        full_buffer.extend_from_slice(&vec![0xFFFFFF; width as usize * 100]);
+                        fullheight += 100;
+                    }
 
                     // display selected image mosaic
                     let (mut imx, mut imy) = (0, topline + 20);
@@ -270,7 +315,7 @@ fn main() {
 
                         let (xofs, yofs) = ((MSC_MX_E - imd.0) / 2, (MSC_MX_E - imd.1) / 2);
 
-                        draw::ins_image(&mut draw_buffer, (width, height), (imx + xofs, imy + yofs), imd, &imb);
+                        draw::ins_image(&mut full_buffer, (width, height), (imx + xofs, imy + yofs), imd, &imb);
 
                         if crossc <= 2 {
                             imx += MSC_MX_E;
@@ -280,6 +325,11 @@ fn main() {
                             imy += MSC_MX_E;
                             crossc = 0;
                         }
+
+                        if imy >= fullheight - 100 {
+                            full_buffer.extend_from_slice(&vec![0xFFFFFF; width as usize * 100]);
+                            fullheight += 100;
+                        }
                     }
 
                     topline = imy + MSC_MX_E;
@@ -288,28 +338,44 @@ fn main() {
                     topline += 20;
                     for fp in cats[cur_cat].iter() {
                         draw::ins_text(
-                            &mut draw_buffer,
+                            &font,
+                            &mut full_buffer,
                             (width, height),
                             (0, topline),
                             20,
                             fp.file_name().unwrap().as_encoded_bytes(),
                         );
                         topline += 20;
+
+                        if topline >= fullheight - 100 {
+                            full_buffer.extend_from_slice(&vec![0xFFFFFF; width as usize * 100]);
+                            fullheight += 100;
+                        }
                     }
 
                     topline += 20;
                     draw::flow_text(
-                        &mut draw_buffer,
+                        &font,
+                        &mut full_buffer,
                         (width, height),
                         (0, topline),
                         None,
                         30,
-                        b"Disposition options: [L]ist files, [C]opy to directory, [Z]ip into archive, [N]othing"
+                        b"Disposition options:\n[L]ist files\n[C]opy to directory\n[Z]ip into archive\n[N]othing"
                     );
+
+                    let mut sect_start = spos as usize * width as usize;
+                    let sect_span = height as usize * width as usize;
+                    if sect_start + sect_span >= full_buffer.len() {
+                        sect_start = full_buffer.len() - sect_span
+                    }
+                    draw_buffer.copy_from_slice(&full_buffer[sect_start..sect_start + sect_span]);
+
                 }
                 State::DspnPath => {
                     while !dspns.is_empty() && out_path.is_none() {
                         draw::ins_text(
+                            &font,
                             &mut draw_buffer,
                             (width, height),
                             (0, 0),
@@ -321,6 +387,7 @@ fn main() {
                     }
 
                     state = State::DspnCom;
+                    spos = 0;
                     frame.request_redraw();
                 }
                 State::DspnCom => {
@@ -329,16 +396,24 @@ fn main() {
                         return;
                     }
 
-                    let mut topline = 0;
+                    let mut topline: u32 = 0;
 
                     topline += 50 + 50 * draw::flow_text(
+                        &font,
                         &mut draw_buffer,
                         (width, height),
-                        (0, topline),
+                        (0, topline.saturating_sub(spos)),
                         None,
                         50,
                         format!("Output directory: {:?}", out_path.as_ref().unwrap()).as_bytes(),
                     );
+
+                    if topline >= fullheight - 100 {
+                        full_buffer.extend_from_slice(&vec![0xFFFFFF; width as usize * 100]);
+                        fullheight += 100;
+                    }
+
+                    // TODO: above path must print without backslashes on Windows
 
                     for (c, d) in &dspns {
                         let cat = &cats[*c as usize];
@@ -346,9 +421,10 @@ fn main() {
 
                         // name
                         draw::ins_text(
-                            &mut draw_buffer,
+                            &font,
+                            &mut full_buffer,
                             (width, height),
-                            (0, topline),
+                            (0, topline.saturating_sub(spos)),
                             30,
                             format!("Category {}", cat_char).as_bytes(),
                         );
@@ -356,9 +432,10 @@ fn main() {
 
                         // count
                         draw::ins_text(
-                            &mut draw_buffer,
+                            &font,
+                            &mut full_buffer,
                             (width, height),
-                            (0, topline),
+                            (0, topline.saturating_sub(spos)),
                             30,
                             format!("{} images", cat.len()).as_bytes(),
                         );
@@ -366,9 +443,10 @@ fn main() {
 
                         // disp
                         draw::ins_text(
-                            &mut draw_buffer,
+                            &font,
+                            &mut full_buffer,
                             (width, height),
-                            (0, topline),
+                            (0, topline.saturating_sub(spos)),
                             30,
                             format!("To {}", match d {
                                 Dspn::List => "list",
@@ -377,15 +455,28 @@ fn main() {
                             }).as_bytes(),
                         );
                         topline += 60;
+
+                        if topline >= fullheight - 100 {
+                            full_buffer.extend_from_slice(&vec![0xFFFFFF; width as usize * 100]);
+                            fullheight += 100;
+                        }
                     }
 
                     draw::ins_text(
-                        &mut draw_buffer,
+                        &font,
+                        &mut full_buffer,
                         (width, height),
-                        (0, topline),
+                        (0, topline.saturating_sub(spos)),
                         40,
                         b"Press <Enter> to commit..."
                     );
+
+                    let mut sect_start = spos as usize * width as usize;
+                    let sect_span = height as usize * width as usize;
+                    if sect_start + sect_span >= full_buffer.len() {
+                        sect_start = full_buffer.len() - sect_span
+                    }
+                    draw_buffer.copy_from_slice(&full_buffer[sect_start..sect_start + sect_span]);
                 }
             }
 
@@ -414,13 +505,54 @@ fn main() {
             },
         } => {
             match lokey {
+                Key::Named(NamedKey::ArrowUp) => match state {
+                    State::DspnCat | State::DspnCom => {
+                        spos = spos.saturating_sub(100);
+                        frame.request_redraw();
+                    }
+                    _ => (),
+                }
+                Key::Named(NamedKey::ArrowDown) => match state {
+                    State::DspnCat | State::DspnCom => {
+                        spos += 100;
+                        frame.request_redraw();
+                    }
+                    _ => (),
+                }
+                Key::Named(NamedKey::ArrowLeft) => match state {
+                    State::Elect => {
+                        cur_rot = match cur_rot {
+                            Rot::R0 => Rot::R270,
+                            Rot::R90 => Rot::R0,
+                            Rot::R180 => Rot::R90,
+                            Rot::R270 => Rot::R180,
+                        };
+                        frame.request_redraw();
+                    }
+                    _ => (),
+                }
+                Key::Named(NamedKey::ArrowRight) => match state {
+                    State::Elect => {
+                        cur_rot = match cur_rot {
+                            Rot::R0 => Rot::R90,
+                            Rot::R90 => Rot::R180,
+                            Rot::R180 => Rot::R270,
+                            Rot::R270 => Rot::R0,
+                        };
+                        frame.request_redraw();
+                    }
+                    _ => (),
+                }
                 Key::Named(NamedKey::Space) => match state {
                     State::Elect => {
                         if cats_assigned[cur_fp].is_some() {
                             cats_assigned[cur_fp] = None;
                             useful_minis[cur_fp] = None;
+
+                            trail_out.write_all(format!("{:?} ><\n", file_paths[cur_fp]).as_bytes()).unwrap()
                         }
                         cur_fp += 1;
+                        cur_rot = Rot::R0;
                         frame.request_redraw();
                     }
                     _ => (),
@@ -501,6 +633,7 @@ fn main() {
                             if cbyt.is_ascii_alphabetic() {
                                 cats_assigned[cur_fp] = Some(cbyt - if cbyt.is_ascii_uppercase() { 0x41 } else { 0x61 });
                                 useful_minis[cur_fp] = Some(loaded_image.as_ref().unwrap().1.thumbnail(MSC_MX_E, MSC_MX_E));
+                                trail_out.write_all(format!("{:?} >> {}\n", file_paths[cur_fp], String::from_utf8_lossy(&[cbyt.to_ascii_uppercase()])).as_bytes()).unwrap();
                                 cur_fp += 1;
                                 frame.request_redraw();
                             }
@@ -528,6 +661,18 @@ fn main() {
                 _ => (),
             }
         }
+        Event::WindowEvent { window_id: _, event: WindowEvent::MouseWheel { device_id: _, delta, phase: _ } } => {
+            let amount: i32 = match delta {
+                winit::event::MouseScrollDelta::LineDelta(_, l) => (l * 20.0) as i32,
+                winit::event::MouseScrollDelta::PixelDelta(PhysicalPosition{y, ..}) => y as i32,
+            };
+            if amount < 0 {
+                spos = spos.saturating_sub(amount.abs() as u32)
+            } else {
+                spos += amount as u32;
+            }
+            frame.request_redraw();
+        }
         Event::WindowEvent {
             window_id: _,
             event: WindowEvent::CloseRequested,
@@ -537,9 +682,12 @@ fn main() {
 }
 
 mod draw {
+    use ab_glyph::{Font, FontRef, ScaleFont};
+
     const CHARSHEET: &[u8; 60 * 26 * 100 * 3] = include_bytes!("../cs.dat");
 
     pub fn ins_text(
+        font: &FontRef,
         buf: &mut dyn std::ops::DerefMut<Target = [u32]>,
         dim: (u32, u32),
         pos: (u32, u32),
@@ -554,41 +702,58 @@ mod draw {
         assert_eq!(cs.len(), P_LINE as usize * 3);
 
         let (pxh, pxw) = (pxh as u32, (pxh as u32 * 3) / 5);
+        let hadv = font.as_scaled(pxh as f32).h_advance(font.glyph_id('a')) as u32;
 
         for (i, b) in string.iter().enumerate() {
-            let ctc = match b {
-                b'a'..=b'z' => 60 * (b - b'a') as u32,
-                b'A'..=b'Z' => (P_LINE) + (60 * (b - b'A') as u32),
-                b','..=b'<' => (P_LINE * 2) + (60 * (b - b',') as u32),
-                b'>' | b'?' => (P_LINE * 2) + (60 * (17 + b - b'>') as u32),
-                b'!' | b'"' => (P_LINE * 2) + (60 * (19 + b - b'!') as u32),
-                b'\'' => (P_LINE * 2) + (60 * (21 + b - b'\'') as u32),
-                b'[' => (P_LINE * 2) + (60 * (22 + b - b'[') as u32),
-                b']' => (P_LINE * 2) + (60 * (23 + b - b']') as u32),
-                b'_' => (P_LINE * 2) + (60 * (24 + b - b'_') as u32),
-                b'~' => (P_LINE * 2) + (60 * (25 + b - b'~') as u32),
-                b' ' => continue,
-                _ => panic!(),
-            };
-
-            for cy in 0..100 {
-                for cx in 0..60 {
-                    let out: u32 = {
-                        let ol: u8 = cs[(ctc + (P_ROW * cy) + cx) as usize];
-                        // (ol as u32) << 16 + (ol as u32) << 8 + ol as u32
-                        (ol as u32) << 16
-                    };
-                    let (rx, ry) = (cx * pxh / 100, cy * pxh / 100);
-                    let head = ((pos.1 + ry) * dim.0) + pos.0 + rx + (i as u32 * pxw);
-                    if out != 0 && (head as usize) < buf.len() {
+            let glyph = font.glyph_id(*b as char).with_scale(pxh as f32);
+            if let Some(outline) = font.outline_glyph(glyph) {
+                outline.draw(|x, y, c| {
+                    let head = dim.0 * (pos.1 + y) + pos.0 + x + hadv * i as u32 + 20;
+                    let cov = ((c * 255.0) as u32).min(255);
+                    let out = (255 << 16) + ((255 - cov) << 8) + (255 - cov);
+                    if cov > 0 {
                         buf[head as usize] = out;
                     }
-                }
+                })
             }
+
+            // let ctc = match b {
+            //     b'a'..=b'z' => 60 * (b - b'a') as u32,
+            //     b'A'..=b'Z' => (P_LINE) + (60 * (b - b'A') as u32),
+            //     b','..=b'<' => (P_LINE * 2) + (60 * (b - b',') as u32),
+            //     b'>' | b'?' => (P_LINE * 2) + (60 * (17 + b - b'>') as u32),
+            //     b'!' | b'"' => (P_LINE * 2) + (60 * (19 + b - b'!') as u32),
+            //     b'\'' => (P_LINE * 2) + (60 * (21 + b - b'\'') as u32),
+            //     b'[' => (P_LINE * 2) + (60 * (22 + b - b'[') as u32),
+            //     b']' => (P_LINE * 2) + (60 * (23 + b - b']') as u32),
+            //     b'_' => (P_LINE * 2) + (60 * (24 + b - b'_') as u32),
+            //     b'~' => (P_LINE * 2) + (60 * (25 + b - b'~') as u32),
+            //     b' ' => continue,
+            //     _ => {
+            //         eprintln!("unrecognized char");
+            //         continue;
+            //     }
+            // };
+
+            // for cy in 0..100 {
+            //     for cx in 0..60 {
+            //         let out: u32 = {
+            //             let ol: u8 = cs[(ctc + (P_ROW * cy) + cx) as usize];
+            //             // (ol as u32) << 16 + (ol as u32) << 8 + ol as u32
+            //             (ol as u32) << 16
+            //         };
+            //         let (rx, ry) = (cx * pxh / 100, cy * pxh / 100);
+            //         let head = ((pos.1 + ry) * dim.0) + pos.0 + rx + (i as u32 * pxw);
+            //         if out != 0 && (head as usize) < buf.len() {
+            //             buf[head as usize] = out;
+            //         }
+            //     }
+            // }
         }
     }
 
     pub fn flow_text(
+        font: &FontRef,
         buf: &mut dyn std::ops::DerefMut<Target = [u32]>,
         dim: (u32, u32),
         pos: (u32, u32),
@@ -596,6 +761,8 @@ mod draw {
         pxh: u8,
         string: &[u8],
     ) -> u32 {
+        let hadv = font.as_scaled(pxh as f32).h_advance(font.glyph_id('a')) as u32;
+
         let pxw = (pxh as u32 * 3) / 5;
 
         let avail = dim.0 - pos.0;
@@ -604,7 +771,7 @@ mod draw {
             None => avail,
         };
 
-        let maxc = maxw / pxw;
+        let maxc = maxw / hadv;
         let lines = 1 + (string.len() / maxc as usize);
 
         let mut ll = lines;
@@ -613,7 +780,7 @@ mod draw {
 
         loop {
             let lasc = stac + (maxc as usize).min(string.len() - stac);
-            ins_text(buf, dim, (pos.0, curh), pxh, &string[stac..lasc]);
+            ins_text(font, buf, dim, (pos.0, curh), pxh, &string[stac..lasc]);
 
             if ll > 1 {
                 ll -= 1;
@@ -644,7 +811,8 @@ mod draw {
                     + ((pixels[ip + 1] as u32) << 8)
                     + pixels[ip + 2] as u32;
 
-                buf[op as usize] = pxl;
+                let ln = buf.len();
+                buf[(op as usize).min(ln - 1)] = pxl;
             }
         }
     }
