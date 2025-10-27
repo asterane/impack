@@ -70,6 +70,100 @@ enum Rot {
 /// Mosaic maximum edge length
 const MSC_MX_E: u32 = 200;
 
+const CFG_REL_PATH: &'static str = ".config/impack/impack.cfg";
+
+const DEF_BACK_COL: u32 = 0xFFFFFF;
+const DEF_TEXT_COL: u32 = 0xFF0000;
+
+const DEF_FONT_PATH: &'static str = "FreeMono.otf";
+const DEF_TRAIL_PATH: &'static str = ".impack-trail";
+
+const HELP: &'static str = "Impack, a tool for interactively sorting images
+
+Usage: impack [<path to source dir> [<path to output dir>]]
+
+Reads images from a directory and presents them one at a time. Press a
+letter key to categorize the image or press space to skip. Press left
+and right arrow keys to rotate. Once all images are seen, choose to
+output categories as lists, directories of copied images, or
+compressed archives of the same.";
+
+macro_rules! config_expand {
+    ( ) => {};
+}
+
+struct Cfg {
+    back_col: u32,
+    text_col: u32,
+    font_path: PathBuf,
+    trail_path: PathBuf,
+}
+
+fn parse_config(text: String) -> Cfg {
+    let (mut bcol, mut tcol, mut fpat, mut tpat) = (None, None, None, None);
+
+    for mut ent in text.lines().filter_map(|l| {
+        if l.is_empty() || l.starts_with('#') {
+            None
+        } else {
+            Some(l.split_ascii_whitespace())
+        }
+    }) {
+        match ent.next() {
+            Some(h) => match h {
+                "BackColor" => bcol = ent.next(),
+                "TextColor" => tcol = ent.next(),
+                "FontPath" => fpat = ent.next(),
+                "TrailPath" => tpat = ent.next(),
+                _ => panic!(),
+            },
+            None => unreachable!(),
+        }
+    }
+
+    Cfg {
+        back_col: match bcol {
+            Some(cs) => color_parse(cs.trim().as_bytes()),
+            None => DEF_BACK_COL,
+        },
+        text_col: match tcol {
+            Some(cs) => color_parse(cs.trim().as_bytes()),
+            None => DEF_TEXT_COL,
+        },
+        font_path: match fpat {
+            Some(p) => PathBuf::from(p),
+            None => DEF_FONT_PATH.into(),
+        },
+        trail_path: match tpat {
+            Some(p) => PathBuf::from(p),
+            None => DEF_TRAIL_PATH.into(),
+        },
+    }
+}
+
+fn color_parse(text: &[u8]) -> u32 {
+    let mut acc: u32 = 0;
+    for b in text {
+        match b {
+            b'0'..=b'9' => {
+                acc *= 0x10;
+                acc += (b - b'0') as u32;
+            }
+            b'A'..=b'F' => {
+                acc *= 0x10;
+                acc += 0xA + (b - b'A') as u32;
+            }
+            b'a'..=b'f' => {
+                acc *= 0x10;
+                acc += 0xA + (b - b'a') as u32;
+            }
+            _ => panic!(),
+        }
+    }
+
+    acc
+}
+
 fn main() {
     //! Specification: Accept a directory containing images. Display
     //! the images one by one; accept a keystroke to assign each image
@@ -84,14 +178,20 @@ fn main() {
 
     let mut state = State::Init;
 
+    let cfg_path = PathBuf::from(std::env::var("HOME").unwrap()).join(CFG_REL_PATH);
+    let cfg_content = match std::fs::read_to_string(&cfg_path) {
+        Ok(s) => s,
+        Err(e) => panic!("{}", e),
+    };
+    let config = parse_config(cfg_content);
+
     let mut inp_path = env::args().nth(1).map(|s| PathBuf::from(s));
     let mut out_path = env::args().nth(2).map(|s| PathBuf::from(s));
 
-    let trail_path = PathBuf::from(".impack-trail");
     let mut trail_out = File::options()
         .write(true)
         .create(true)
-        .open(trail_path)
+        .open(config.trail_path)
         .unwrap();
 
     let mut file_paths: Vec<PathBuf> = vec![];
@@ -124,6 +224,7 @@ fn main() {
 
     let mut no_mods = true;
 
+    // TODO: allow font path setting to change font used
     let font = FontRef::try_from_slice(include_bytes!("../FreeMono.otf")).unwrap();
 
     event_loop.run(move |event, elwt| match event {
@@ -146,7 +247,7 @@ fn main() {
             let mut draw_buffer = surface.buffer_mut().unwrap();
 
             full_buffer.clear();
-            full_buffer.extend_from_slice(&vec![0xFFFFFF; (width * height) as usize]);
+            full_buffer.extend_from_slice(&vec![config.back_col; (width * height) as usize]);
 
             // println!("State: {:?}", state);
 
@@ -161,6 +262,7 @@ fn main() {
                             (width, height),
                             (0, 0),
                             80,
+                            config.text_col,
                             b"Choose input directory...",
                         );
 
@@ -267,6 +369,7 @@ fn main() {
                         (width, height),
                         (0, (height - height / 20)),
                         (height / 20) as u8,
+                        config.text_col,
                         format!("{cur_fp}").as_bytes(),
                     );
                 }
@@ -298,11 +401,12 @@ fn main() {
                         (0, topline),
                         None,
                         40,
+                        config.text_col,
                         format!("Dispose Category {}", (cur_cat as u8 + 0x41) as char).as_bytes(),
                     );
 
                     if topline >= fullheight - 100 {
-                        full_buffer.extend_from_slice(&vec![0xFFFFFF; width as usize * 100]);
+                        full_buffer.extend_from_slice(&vec![config.back_col; width as usize * 100]);
                         fullheight += 100;
                     }
 
@@ -327,7 +431,7 @@ fn main() {
                         }
 
                         if imy >= fullheight - 100 {
-                            full_buffer.extend_from_slice(&vec![0xFFFFFF; width as usize * 100]);
+                            full_buffer.extend_from_slice(&vec![config.back_col; width as usize * 100]);
                             fullheight += 100;
                         }
                     }
@@ -343,12 +447,13 @@ fn main() {
                             (width, height),
                             (0, topline),
                             20,
+                            config.text_col,
                             fp.file_name().unwrap().as_encoded_bytes(),
                         );
                         topline += 20;
 
                         if topline >= fullheight - 100 {
-                            full_buffer.extend_from_slice(&vec![0xFFFFFF; width as usize * 100]);
+                            full_buffer.extend_from_slice(&vec![config.back_col; width as usize * 100]);
                             fullheight += 100;
                         }
                     }
@@ -361,6 +466,7 @@ fn main() {
                         (0, topline),
                         None,
                         30,
+                        config.text_col,
                         b"Disposition options:\n[L]ist files\n[C]opy to directory\n[Z]ip into archive\n[N]othing"
                     );
 
@@ -380,6 +486,7 @@ fn main() {
                             (width, height),
                             (0, 0),
                             80,
+                            config.text_col,
                             b"Choose output directory...",
                         );
 
@@ -405,11 +512,12 @@ fn main() {
                         (0, topline.saturating_sub(spos)),
                         None,
                         50,
+                        config.text_col,
                         format!("Output directory: {:?}", out_path.as_ref().unwrap()).as_bytes(),
                     );
 
                     if topline >= fullheight - 100 {
-                        full_buffer.extend_from_slice(&vec![0xFFFFFF; width as usize * 100]);
+                        full_buffer.extend_from_slice(&vec![config.back_col; width as usize * 100]);
                         fullheight += 100;
                     }
 
@@ -426,6 +534,7 @@ fn main() {
                             (width, height),
                             (0, topline.saturating_sub(spos)),
                             30,
+                            config.text_col,
                             format!("Category {}", cat_char).as_bytes(),
                         );
                         topline += 30;
@@ -437,6 +546,7 @@ fn main() {
                             (width, height),
                             (0, topline.saturating_sub(spos)),
                             30,
+                            config.text_col,
                             format!("{} images", cat.len()).as_bytes(),
                         );
                         topline += 30;
@@ -448,6 +558,7 @@ fn main() {
                             (width, height),
                             (0, topline.saturating_sub(spos)),
                             30,
+                            config.text_col,
                             format!("To {}", match d {
                                 Dspn::List => "list",
                                 Dspn::Dir => "subfolder",
@@ -457,7 +568,7 @@ fn main() {
                         topline += 60;
 
                         if topline >= fullheight - 100 {
-                            full_buffer.extend_from_slice(&vec![0xFFFFFF; width as usize * 100]);
+                            full_buffer.extend_from_slice(&vec![config.back_col; width as usize * 100]);
                             fullheight += 100;
                         }
                     }
@@ -468,6 +579,7 @@ fn main() {
                         (width, height),
                         (0, topline.saturating_sub(spos)),
                         40,
+                        config.text_col,
                         b"Press <Enter> to commit..."
                     );
 
@@ -602,7 +714,7 @@ fn main() {
                                     }
                                 }
                                 Dspn::Zip => {
-                                    let name = format!("impack-arc-{cat_char}.zip");
+                                    let name = format!("impack-arcv-{cat_char}.zip");
                                     let mut out =
                                         ZipWriter::new(File::create(path.join(name)).unwrap());
 
@@ -633,7 +745,10 @@ fn main() {
                             if cbyt.is_ascii_alphabetic() {
                                 cats_assigned[cur_fp] = Some(cbyt - if cbyt.is_ascii_uppercase() { 0x41 } else { 0x61 });
                                 useful_minis[cur_fp] = Some(loaded_image.as_ref().unwrap().1.thumbnail(MSC_MX_E, MSC_MX_E));
-                                trail_out.write_all(format!("{:?} >> {}\n", file_paths[cur_fp], String::from_utf8_lossy(&[cbyt.to_ascii_uppercase()])).as_bytes()).unwrap();
+                                trail_out.write_all(format!("{:?} >> {}\n",
+                                                            file_paths[cur_fp],
+                                                            String::from_utf8_lossy(&[cbyt.to_ascii_uppercase()])).as_bytes())
+                                    .unwrap();
                                 cur_fp += 1;
                                 frame.request_redraw();
                             }
@@ -684,7 +799,21 @@ fn main() {
 mod draw {
     use ab_glyph::{Font, FontRef, ScaleFont};
 
-    const CHARSHEET: &[u8; 60 * 26 * 100 * 3] = include_bytes!("../cs.dat");
+    fn merge_col(bg: u32, fg: u32, c: u8) -> u32 {
+        let (bg_r, bg_g, bg_b) = ((bg >> 16 & 0xFF), (bg >> 8 & 0xFF), (bg & 0xFF));
+        let (fg_r, fg_g, fg_b) = ((fg >> 16 & 0xFF), (fg >> 8 & 0xFF), (fg & 0xFF));
+
+        let final_r =
+            (fg_r * c as u32) / u8::MAX as u32 + bg_r * (u8::MAX - c) as u32 / u8::MAX as u32;
+        let final_g =
+            (fg_g * c as u32) / u8::MAX as u32 + bg_g * (u8::MAX - c) as u32 / u8::MAX as u32;
+        let final_b =
+            (fg_b * c as u32) / u8::MAX as u32 + bg_b * (u8::MAX - c) as u32 / u8::MAX as u32;
+
+        (final_r.min(u8::MAX as u32) << 16)
+            + (final_g.min(u8::MAX as u32) << 8)
+            + final_b.min(u8::MAX as u32)
+    }
 
     pub fn ins_text(
         font: &FontRef,
@@ -692,15 +821,9 @@ mod draw {
         dim: (u32, u32),
         pos: (u32, u32),
         pxh: u8,
+        col: u32,
         string: &[u8],
     ) {
-        let cs = CHARSHEET;
-
-        const P_ROW: u32 = 60 * 26;
-        const P_LINE: u32 = P_ROW * 100;
-
-        assert_eq!(cs.len(), P_LINE as usize * 3);
-
         let (pxh, pxw) = (pxh as u32, (pxh as u32 * 3) / 5);
         let hadv = font.as_scaled(pxh as f32).h_advance(font.glyph_id('a')) as u32;
 
@@ -709,46 +832,13 @@ mod draw {
             if let Some(outline) = font.outline_glyph(glyph) {
                 outline.draw(|x, y, c| {
                     let head = dim.0 * (pos.1 + y) + pos.0 + x + hadv * i as u32 + 20;
-                    let cov = ((c * 255.0) as u32).min(255);
-                    let out = (255 << 16) + ((255 - cov) << 8) + (255 - cov);
+                    let cov = ((c * 255.0) as u32).min(u8::MAX as u32) as u8;
+                    let out = merge_col(buf[head as usize], col, cov);
                     if cov > 0 {
                         buf[head as usize] = out;
                     }
                 })
             }
-
-            // let ctc = match b {
-            //     b'a'..=b'z' => 60 * (b - b'a') as u32,
-            //     b'A'..=b'Z' => (P_LINE) + (60 * (b - b'A') as u32),
-            //     b','..=b'<' => (P_LINE * 2) + (60 * (b - b',') as u32),
-            //     b'>' | b'?' => (P_LINE * 2) + (60 * (17 + b - b'>') as u32),
-            //     b'!' | b'"' => (P_LINE * 2) + (60 * (19 + b - b'!') as u32),
-            //     b'\'' => (P_LINE * 2) + (60 * (21 + b - b'\'') as u32),
-            //     b'[' => (P_LINE * 2) + (60 * (22 + b - b'[') as u32),
-            //     b']' => (P_LINE * 2) + (60 * (23 + b - b']') as u32),
-            //     b'_' => (P_LINE * 2) + (60 * (24 + b - b'_') as u32),
-            //     b'~' => (P_LINE * 2) + (60 * (25 + b - b'~') as u32),
-            //     b' ' => continue,
-            //     _ => {
-            //         eprintln!("unrecognized char");
-            //         continue;
-            //     }
-            // };
-
-            // for cy in 0..100 {
-            //     for cx in 0..60 {
-            //         let out: u32 = {
-            //             let ol: u8 = cs[(ctc + (P_ROW * cy) + cx) as usize];
-            //             // (ol as u32) << 16 + (ol as u32) << 8 + ol as u32
-            //             (ol as u32) << 16
-            //         };
-            //         let (rx, ry) = (cx * pxh / 100, cy * pxh / 100);
-            //         let head = ((pos.1 + ry) * dim.0) + pos.0 + rx + (i as u32 * pxw);
-            //         if out != 0 && (head as usize) < buf.len() {
-            //             buf[head as usize] = out;
-            //         }
-            //     }
-            // }
         }
     }
 
@@ -759,6 +849,7 @@ mod draw {
         pos: (u32, u32),
         maxw: Option<u32>,
         pxh: u8,
+        col: u32,
         string: &[u8],
     ) -> u32 {
         let hadv = font.as_scaled(pxh as f32).h_advance(font.glyph_id('a')) as u32;
@@ -780,7 +871,7 @@ mod draw {
 
         loop {
             let lasc = stac + (maxc as usize).min(string.len() - stac);
-            ins_text(font, buf, dim, (pos.0, curh), pxh, &string[stac..lasc]);
+            ins_text(font, buf, dim, (pos.0, curh), pxh, col, &string[stac..lasc]);
 
             if ll > 1 {
                 ll -= 1;
